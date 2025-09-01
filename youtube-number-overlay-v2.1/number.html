@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Número de espectadores — YouTube</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@800&display=swap" rel="stylesheet">
+<style>
+  html,body{height:100%;margin:0;background:transparent}
+  body{display:flex;align-items:flex-start;justify-content:flex-start;padding:8px}
+  .num{color:#fff;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Arial;font-weight:800;font-variant-numeric:tabular-nums;text-shadow:0 2px 4px rgba(0,0,0,.45)}
+  .debug{position:fixed;right:6px;bottom:6px;background:rgba(0,0,0,.5);color:#ddd;font:12px/1.4 system-ui,Segoe UI,Arial;padding:6px 8px;border-radius:6px;max-width:50vw;display:none;white-space:pre-wrap}
+</style>
+</head>
+<body>
+  <div id="n" class="num">0</div>
+  <div id="dbg" class="debug"></div>
+<script>
+  function get(name, d){ const u=new URL(window.location.href); return u.searchParams.get(name) ?? d; }
+  const debugMode = get('debug','0') === '1';
+
+  function showDebug(msg){
+    if(!debugMode) return;
+    const box = document.getElementById('dbg');
+    box.style.display = 'block';
+    const now = new Date().toLocaleTimeString();
+    box.textContent = `[${now}] ` + msg;
+  }
+
+  function parseIntLoose(v){
+    if(typeof v === 'number') return v;
+    if(typeof v === 'string'){
+      const m = v.match(/[0-9]+/); if(m) return parseInt(m[0],10);
+    }
+    return null;
+  }
+
+  function extractYouTubeId(u){
+    try{
+      const url = new URL(u);
+      if(url.hostname.endsWith('youtu.be')){
+        return url.pathname.replace('/', '').split('?')[0];
+      }
+      const v = url.searchParams.get('v');
+      if(v) return v;
+      // /live/VIDEO_ID
+      const m = url.pathname.match(/\/live\/([A-Za-z0-9_-]{6,})/);
+      if(m) return m[1];
+      // /channel/UCxxxxxx/live -> não contém ID; resolveremos via search API
+      // /@handle/live -> resolveremos via channels API
+      return null;
+    }catch{ return null; }
+  }
+
+  async function fetchJSON(url){
+    const res = await fetch(url);
+    const ct = res.headers.get('content-type')||'';
+    let body;
+    try { body = ct.includes('json') ? await res.json() : JSON.parse(await res.text()); }
+    catch(e){ body = { __raw: await res.text() }; }
+    if(!res.ok){
+      throw new Error(`HTTP ${res.status}: ${res.statusText} | URL: ${url} | body: ${JSON.stringify(body).slice(0,200)}`);
+    }
+    return body;
+  }
+
+  function getCfg(){ return fetchJSON('config.json'); }
+
+  function resolve(obj, path){
+    if(!path) return parseIntLoose(obj);
+    const parts = path.split('.').filter(Boolean);
+    let cur = obj;
+    for(const p of parts){
+      if(p === '0' && Array.isArray(cur)){ cur = cur[0]; continue; }
+      if(cur && (p in cur)) cur = cur[p]; else return null;
+    }
+    return parseIntLoose(cur);
+  }
+
+  async function resolveVideoIdFromLiveUrl(live, cfg){
+    const url = new URL(live);
+    // /watch?v=... ou youtu.be/..., tentamos direto
+    const direct = extractYouTubeId(live);
+    if(direct) return direct;
+
+    // /@handle/live -> pegar channelId
+    const path = url.pathname;
+    const handleMatch = path.match(/\/@([^\/]+)\/live/);
+    if(handleMatch){
+      const handle = '@' + handleMatch[1];
+      const chUrl = cfg.channelsByHandleTemplate.replace('{handle}', encodeURIComponent(handle)).replace('{key}', encodeURIComponent(cfg.apiKey||''));
+      showDebug(`Resolvendo handle ${handle} → channelId ...`);
+      const ch = await fetchJSON(chUrl);
+      const channelId = ch?.items?.[0]?.id;
+      if(channelId){
+        const searchUrl = cfg.liveSearchTemplate.replace('{channelId}', encodeURIComponent(channelId)).replace('{key}', encodeURIComponent(cfg.apiKey||''));
+        showDebug(`Buscando live atual do canal ${channelId} ...`);
+        const s = await fetchJSON(searchUrl);
+        const vid = s?.items?.[0]?.id?.videoId;
+        if(vid) return vid;
+        throw new Error('Nenhuma live ao vivo encontrada para esse canal.');
+      }
+      throw new Error('Não consegui resolver o @handle para channelId.');
+    }
+
+    // /channel/UCxxxx/live -> usar o channelId diretamente
+    const chMatch = path.match(/\/channel\/(UC[0-9A-Za-z_-]{10,})\/live/);
+    if(chMatch){
+      const channelId = chMatch[1];
+      const searchUrl = cfg.liveSearchTemplate.replace('{channelId}', encodeURIComponent(channelId)).replace('{key}', encodeURIComponent(cfg.apiKey||''));
+      showDebug(`Buscando live atual do canal ${channelId} ...`);
+      const s = await fetchJSON(searchUrl);
+      const vid = s?.items?.[0]?.id?.videoId;
+      if(vid) return vid;
+      throw new Error('Nenhuma live ao vivo encontrada nesse canal.');
+    }
+
+    throw new Error('Não consegui extrair o VIDEO_ID (tente colar a URL com watch?v=... ou youtu.be/...).');
+  }
+
+  async function getConcurrentViewers(vid, cfg){
+    const url = cfg.videosTemplate.replace('{id}', encodeURIComponent(vid)).replace('{key}', encodeURIComponent(cfg.apiKey||''));
+    const json = await fetchJSON(url);
+    const val = resolve(json, cfg.concurrentViewersPath || 'items.0.liveStreamingDetails.concurrentViewers');
+    return val;
+  }
+
+  (async function init(){
+    const live = get('live','');
+    const fontsize = parseInt(get('fontsize',''),10) || 42;
+    const interval = Math.max(5, Math.min(120, parseInt(get('interval',''),10) || 10));
+    const el = document.getElementById('n'); el.style.fontSize = fontsize + 'px';
+
+    if(!live){ document.body.innerHTML='<div style="color:#fff;font-family:Inter">Erro: use <code>?live=URL_DA_LIVE</code></div>'; return; }
+
+    try{
+      const cfg = await getCfg();
+      const vid = await resolveVideoIdFromLiveUrl(live, cfg);
+      showDebug(`VIDEO_ID: ${vid}`);
+
+      async function tick(){
+        try{
+          const v = await getConcurrentViewers(vid, cfg);
+          if(typeof v === 'number'){ el.textContent = new Intl.NumberFormat('pt-BR').format(v); showDebug(`OK: ${v} viewers`); }
+          else { showDebug('Sem número (talvez offline ou live privada)'); }
+        }catch(e){ showDebug(String(e)); }
+      }
+      await tick();
+      setInterval(tick, interval * 1000);
+    }catch(e){
+      showDebug(String(e));
+    }
+  })();
+</script>
+</body>
+</html>

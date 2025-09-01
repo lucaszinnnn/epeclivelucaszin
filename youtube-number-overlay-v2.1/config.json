@@ -1,0 +1,9 @@
+{
+  "apiKey": "AIzaSyCqv78k5T-i4z2pJB7wq17VQktCh3wAx20",
+  "videosTemplate": "https://www.googleapis.com/youtube/v3/videos?part=liveStreamingDetails&id={id}&key={key}",
+  "channelsByHandleTemplate": "https://www.googleapis.com/youtube/v3/channels?part=id&forHandle={handle}&key={key}",
+  "liveSearchTemplate": "https://www.googleapis.com/youtube/v3/search?part=id&channelId={channelId}&eventType=live&type=video&maxResults=1&key={key}",
+  "concurrentViewersPath": "items.0.liveStreamingDetails.concurrentViewers",
+  "defaultFontSize": 42,
+  "defaultInterval": 10
+}
